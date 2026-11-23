@@ -1,8 +1,8 @@
 {
   "name": "monitor-prawa",
   "productName": "Monitor prawa",
-  "version": "1.0.0",
-  "description": "Monitor prawa oświatowego: codzienny skan zmian prawa z analizą AI (Windows, Linux, Android)",
+  "version": "1.1.0",
+  "description": "Monitor prawa oświatowego: codzienny skan zmian prawa z analizą AI przez konto ChatGPT, Gemini lub Claude (Windows, Linux, Android)",
   "main": "electron/main.js",
   "author": "projektnumer4",
   "license": "MIT",
@@ -20,6 +20,9 @@
     "dist:linux": "npm run build:engine && electron-builder --linux AppImage --publish never",
     "dist:win": "npm run build:engine && electron-builder --win portable --publish never",
     "android:prepare": "npm run build:engine && node scripts/android-prepare.mjs"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.5.438"
   },
   "devDependencies": {
     "@capacitor/android": "^8.6.2",
@@ -47,7 +50,20 @@
       "electron/**/*",
       "www/**/*",
       "package.json",
-      "!www/**/*.map"
+      "!www/**/*.map",
+      "!node_modules/pdfjs-dist/build/**",
+      "!node_modules/pdfjs-dist/web/**",
+      "!node_modules/pdfjs-dist/image_decoders/**",
+      "!node_modules/pdfjs-dist/types/**",
+      "!node_modules/pdfjs-dist/wasm/**",
+      "!node_modules/pdfjs-dist/iccs/**",
+      "!node_modules/pdfjs-dist/**/*.map",
+      "!node_modules/pdfjs-dist/legacy/web/**",
+      "!node_modules/pdfjs-dist/legacy/image_decoders/**",
+      "!node_modules/pdfjs-dist/legacy/build/*.min.mjs",
+      "!node_modules/pdfjs-dist/legacy/build/pdf.sandbox*",
+      "!node_modules/pdfjs-dist/legacy/build/pdf.renderer*",
+      "!node_modules/@napi-rs/**"
     ],
     "afterPack": "build/afterPack.js",
     "linux": {
@@ -68,7 +84,10 @@
     },
     "portable": {
       "artifactName": "Monitor-prawa-${version}-portable.exe"
-    }
+    },
+    "asarUnpack": [
+      "node_modules/pdfjs-dist/**"
+    ]
   },
   "desktopName": "monitor-prawa.desktop"
 }

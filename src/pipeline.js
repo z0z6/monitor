@@ -6,7 +6,7 @@ import { renderReport } from './report.js';
 
 // Błędy AI, które powtórzą się dla każdej kolejnej pozycji: brak logowania lub klucza, wyczerpany limit, brak programu.
 // Po takim błędzie analiza czeka do następnego skanu, zamiast zbierać ten sam błąd dziesiątki razy.
-const FATAL_AI = /zalogowan|zaloguj|limit użycia|klucz|api key|x-api-key|unauthori[sz]ed|forbidden|HTTP 40[13]|HTTP 429|ogranicza liczbę|rate.?limit|usage limit|quota|RESOURCE_EXHAUSTED|credit|billing|saldo|Nie znaleziono programu Claude Code|nie działa tylko|tylko w wersji na komputer/i;
+const FATAL_AI = /zalogowan|zaloguj|limit użycia|klucz|api key|x-api-key|unauthori[sz]ed|forbidden|HTTP 40[13]|HTTP 429|ogranicza liczbę|rate.?limit|usage limit|quota|RESOURCE_EXHAUSTED|credit|billing|saldo|Nie znaleziono programu|Wyczerpano limit|nie jest zalogowane|Brak połączonego konta|Nie wybrano sposobu analizy|tylko w wersji na komputer/i;
 const MAX_AI_FAILS_IN_ROW = 3;
 
 /**

@@ -1,11 +1,12 @@
 // Narzędzie dla programisty (Node 20+): podgląd działania silnika bez budowania aplikacji.
-//   node src/cli.js scan [--fixtures=test/fixtures] [--now=ISO] [--mock-ai] [--out=out]   skan, raport w out/report.html
+//   node src/cli.js scan [--fixtures=test/fixtures] [--now=ISO] [--out=out]   pokazowy skan, raport w out/report.html
 //   node src/cli.js verify                                                                 dostępność źródeł i aktów obserwowanych
-// Analiza AI działa w aplikacji (konto Claude albo klucz API); tutaj tylko tryb bez AI lub próbny.
+// Analiza AI działa w aplikacji (konto ChatGPT, Gemini lub Claude albo klucz API); tutaj tylko tryb próbny
+// (wynik oznaczony „TRYB PRÓBNY”, do sprawdzania źródeł i raportu).
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { createNodeHttp, createFixtureHttp, fileBackend } from './node.js';
-import { createMockAnalyzer, createRulesAnalyzer } from './analyze.js';
+import { createMockAnalyzer } from './analyze.js';
 import { createStore } from './store.js';
 import { runScan } from './pipeline.js';
 import { buildSources } from './sources/index.js';
@@ -27,7 +28,7 @@ async function scan() {
   const out = opt('out') || 'out';
   // Uruchomienie na danych testowych nie zostawia stanu: każde daje ten sam raport.
   const store = createStore(fixturesDir ? {} : fileBackend(opt('state') || '.data/state.json'));
-  const analyzer = flag('mock-ai') ? createMockAnalyzer() : createRulesAnalyzer();
+  const analyzer = createMockAnalyzer();
   const result = await runScan({ cfg, http, store, analyzer, now: opt('now') ? new Date(opt('now')) : new Date(), log });
 
   await mkdir(out, { recursive: true });
@@ -67,7 +68,7 @@ async function verify() {
 
 const commands = { scan, verify };
 if (!commands[cmd]) {
-  log('Użycie: node src/cli.js <scan|verify> [--fixtures=katalog] [--now=ISO] [--mock-ai] [--out=katalog] [--state=plik] [--config=plik]');
+  log('Użycie: node src/cli.js <scan|verify> [--fixtures=katalog] [--now=ISO] [--out=katalog] [--state=plik] [--config=plik]');
   process.exit(2);
 }
 commands[cmd]().catch((e) => {

@@ -17,14 +17,19 @@ analizuje je przez AI (streszczenie, priorytet, zadania dla ról, dokumenty do z
 
 ## AI: połączenie z własnym kontem
 
-| Sposób | Gdzie | Koszt |
-|---|---|---|
-| Konto Claude (przez oficjalny Claude Code) | Windows, Linux | w ramach planu Claude Pro/Max; logowanie jednym kliknięciem w aplikacji |
-| Klucz API Claude | wszędzie | za zużycie |
-| Klucz API Gemini | wszędzie | darmowy poziom Google AI Studio |
-| Bez AI | wszędzie | 0 zł, tylko słowa kluczowe i metadane |
+W Ustawieniach → AI są trzy konta, jedno pod drugim. Przycisk „Połącz” (za zgodą użytkownika) instaluje oficjalny program
+producenta do folderu użytkownika, bez uprawnień administratora, i otwiera stronę logowania. Jest też przewodnik krok po kroku z poleceniami do skopiowania.
 
-Do modelu trafiają wyłącznie publiczne akty prawne, nigdy dane uczniów ani pracowników.
+| Konto | Program | Plan | Gdzie |
+|---|---|---|---|
+| ChatGPT (domyślne) | Codex CLI (OpenAI) | wystarczy darmowe konto ChatGPT | Windows, Linux |
+| Google Gemini | Antigravity CLI `agy` (Google, następca Gemini CLI) | wystarczy darmowe konto Google | Windows, Linux |
+| Claude | Claude Code (Anthropic) | wymaga planu Pro lub Max | Windows, Linux |
+| Klucz API Gemini / Claude | (Ustawienia zaawansowane) | darmowy poziom AI Studio / za zużycie | wszędzie, na Androidzie jedyna opcja |
+
+- Przy wyczerpanym limicie darmowego konta skan sam przechodzi na kolejne połączone konto (kolejność w ustawieniach zaawansowanych, przełącznik „Gdy skończy się limit…”).
+- Trybu „Bez AI” już nie ma (od wersji 1.1): ocena samymi słowami kluczowymi dawała raport bez streszczeń i zadań. Ustawienia z wersji 1.0 przechodzą same: „Bez AI” → ChatGPT, klucze API zostają.
+- Do modelu trafiają wyłącznie publiczne akty prawne i opis placówki z Ustawień, nigdy dane uczniów ani pracowników. Hasło wpisuje się tylko na stronie producenta; aplikacja nie widzi haseł ani tokenów.
 
 ## Źródła
 
@@ -58,7 +63,7 @@ Gotowe pliki: Actions → przebieg → *Artifacts*. Tag `v*` (np. `v1.1.0`) twor
 
 ```bash
 npm install && npm test        # testy silnika (bez internetu)
-npm run dry-run                # pokazowy skan na danych testowych, raport w out/report.html
+npm run dry-run                # pokazowy skan na danych testowych (analiza próbna, bez AI), raport w out/report.html
 npm run verify                 # czy źródła i akty obserwowane odpowiadają (wymaga internetu)
 cd app && npm install && npm test && npm start   # aplikacja na komputerze
 ```
@@ -77,13 +82,15 @@ W aplikacji te same ustawienia zmienisz w zakładce Ustawienia (zapisują się l
 - Bezpieczniki Electrona: bez trybu „uruchom jako Node”, bez `NODE_OPTIONS` i `--inspect`, aplikacja tylko z archiwum asar.
 - Linux: piaskownica Chromium jest wyłączana wyłącznie na systemach, które blokują ją przez AppArmor (np. Ubuntu 23.10+).
 - Android: dane i klucze są wyłączone z kopii zapasowej Google i `adb backup`, ruch tylko szyfrowany.
-- Claude Code dostaje tylko narzędzie odczytu załączonego PDF-u (bez powłoki, sieci i zapisu), a nazwa modelu i ścieżka programu są sprawdzane przed uruchomieniem.
+- Programy kont AI działają w pustym katalogu tymczasowym. Codex: `--sandbox read-only`, wyłączona powłoka i wyszukiwanie w sieci. Antigravity: `--sandbox`, bez poleceń z ukośnikiem.
+  Claude Code: tylko narzędzie odczytu załączonego PDF-u. ChatGPT i Gemini dostają treść PDF-u jako tekst odczytany lokalnie (pdf.js), bo nie mają dostępu do plików.
+  Nazwy modeli i ścieżki programów są sprawdzane przed uruchomieniem; przy zamknięciu aplikacji wszystkie uruchomione programy są kończone.
 - GitHub Actions: domyślnie tylko odczyt repozytorium, zapis wyłącznie przy tworzeniu wydania; hasła podpisu APK czyta Gradle ze zmiennych, a plik klucza jest usuwany po budowie.
 
 ## Co jest sprawdzone, a co nie
 
 Sprawdzone testami: filtr, reguły priorytetów, parsowanie ELI, RSS, RCL i BIP, odporność na awarię źródła,
-brak dublowania zmian przy ponownym skanie, kształt żądań do API Claude i Gemini, escapowanie treści w raporcie, magazyn danych.
+brak dublowania zmian przy ponownym skanie, kształt żądań do API Claude i Gemini, argumenty programów kont AI, przełączanie przy limicie (na atrapach `codex`, `agy`, `claude`), odczyt tekstu z PDF, escapowanie treści w raporcie, magazyn danych.
 
 **Nie sprawdzone na żywo**: rzeczywiste odpowiedzi wszystkich źródeł (uruchom `npm run verify` albo w aplikacji Źródła → Sprawdź)
 oraz jakość analizy AI na prawdziwych aktach: przez pierwsze tygodnie czytaj streszczenia krytycznie.
@@ -94,4 +101,4 @@ oraz jakość analizy AI na prawdziwych aktach: przez pierwsze tygodnie czytaj s
 - Akty bez słów kluczowych w tytule i bez odwołania do aktów obserwowanych mogą zostać pominięte. Rozszerzaj `keywords` i `watchedActs`.
 - Android nie pozwala na niezawodny skan w tle, dlatego skan rusza przy otwarciu aplikacji.
 - RCL (legislacja.rcl.gov.pl) bywa niedostępny i nie odpowiada na połączenia z serwerów za granicą (np. GitHub Actions). Aplikacja rezygnuje z niego po ok. 40 s i zgłasza to w raporcie; reszta skanu działa normalnie.
-- Błąd analizy AI (brak logowania, limit planu, zły klucz) nie jest błędem źródła: analiza czeka do następnego skanu, a nieprzeanalizowane pozycje wracają automatycznie.
+- Błąd analizy AI (brak logowania, wyczerpany limit wszystkich połączonych kont, zły klucz) nie jest błędem źródła: analiza czeka do następnego skanu, a nieprzeanalizowane pozycje wracają automatycznie.

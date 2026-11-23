@@ -1,14 +1,15 @@
 'use strict';
 // Proces główny Electrona (Windows, Linux). Interfejs i silnik skanu działają w oknie (www/),
 // a tutaj są tylko rzeczy, których okno nie może zrobić samo: pobieranie stron bez blokad CORS,
-// zapis plików, zaszyfrowane klucze API, program Claude Code, zasobnik i powiadomienia.
+// zapis plików, zaszyfrowane klucze API, programy kont AI (ChatGPT, Gemini, Claude), zasobnik i powiadomienia.
 const { app, BrowserWindow, ipcMain, dialog, shell, Notification, Tray, Menu, nativeImage, nativeTheme, safeStorage, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const { ClaudeAccount } = require('./claude-account');
-const { ClaudeCodeProvider, findClaude, isClaudeBinary } = require('./ai/providers');
+const { Accounts } = require('./accounts');
+const { DEFS, ACCOUNT_IDS, SAFE_MODEL, createProvider, runWithFallback } = require('./ai/providers');
+const cliTools = require('./ai/cli-tools');
 
 const APP_NAME = 'Monitor prawa';
 app.setName(APP_NAME);
@@ -25,7 +26,7 @@ if (!process.env.APP_SHOTS && !app.requestSingleInstanceLock()) app.quit();
 let win = null;
 let tray = null;
 let quitting = false;
-let account = null;
+let accounts = null;
 
 // ─────────────────────────── pliki danych ───────────────────────────
 const KV_NAMES = new Set(['state', 'settings']);
@@ -62,15 +63,26 @@ async function kvSet(name, json) {
   return true;
 }
 
-const SETTINGS_DEFAULTS = { ai: { provider: 'claude-code', model: 'sonnet', claudePath: '' }, ui: { theme: 'system' }, app: { runInBackground: true, autostart: false, notifications: true } };
-// Model i ścieżka programu trafiają do wiersza poleceń, więc przyjmujemy tylko bezpieczne wartości
-// (na Windows plik claude.cmd uruchamia się przez powłokę, gdzie znaki & | ^ " miałyby specjalne znaczenie).
-const SAFE_MODEL = /^[A-Za-z0-9._:-]{1,64}$/;
+// Ustawienia zapisuje okno (settings.json); proces główny tylko je czyta.
+const SETTINGS_DEFAULTS = {
+  ai: { provider: 'codex', fallback: true, order: [...ACCOUNT_IDS], connected: {}, paths: {}, model: 'sonnet', codexModel: '', geminiModel: '', claudePath: '' },
+  ui: { theme: 'system' },
+  app: { runInBackground: true, autostart: false, notifications: true },
+};
+// Modele i ścieżki programów trafiają do wiersza poleceń, więc przyjmujemy tylko bezpieczne wartości
+// (na Windows pliki .cmd uruchamiają się przez powłokę, gdzie znaki & | ^ " miałyby specjalne znaczenie).
 function settings() {
   const s = kvGet('settings') || {};
   const ai = { ...SETTINGS_DEFAULTS.ai, ...(s.ai || {}) };
-  if (!SAFE_MODEL.test(String(ai.model))) ai.model = SETTINGS_DEFAULTS.ai.model;
-  if (ai.claudePath && !isClaudeBinary(ai.claudePath)) ai.claudePath = '';
+  for (const k of ['model', 'codexModel', 'geminiModel']) if (ai[k] && !SAFE_MODEL.test(String(ai[k]))) ai[k] = SETTINGS_DEFAULTS.ai[k];
+  const paths = {};
+  for (const id of ACCOUNT_IDS) {
+    const p = (ai.paths || {})[id] || (id === 'claude-code' ? ai.claudePath : '');
+    if (p && cliTools.isAllowedBinary(DEFS[id], p)) paths[id] = p;
+  }
+  ai.paths = paths;
+  ai.claudePath = '';
+  ai.connected = { ...(ai.connected || {}) };
   return {
     ai,
     ui: { ...SETTINGS_DEFAULTS.ui, ...(s.ui || {}) },
@@ -364,18 +376,22 @@ function registerIpc() {
   handle('http:fetch', (url, opts) => httpFetch(url, opts));
   handle('notify', (title, body) => { notify(title, body); return true; });
 
-  handle('ai:claudeCode', (req) => new ClaudeCodeProvider(settings()).run(req));
-  handle('claude:status', () => account.status());
-  handle('claude:install', () => account.install());
-  handle('claude:login', () => account.startLogin());
-  handle('claude:code', (code) => account.submitCode(code));
-  handle('claude:cancel', () => { account.cancelLogin(); return true; });
-  handle('claude:logout', () => account.logout());
-  handle('claude:path', () => findClaude(settings().ai.claudePath));
-  handle('claude:browse', async () => {
-    const r = await dialog.showOpenDialog(win, { title: 'Wskaż program Claude Code', properties: ['openFile'] });
+  // Analiza przez konto AI: wybrane konto, a przy wyczerpanym limicie – kolejne połączone (Ustawienia → AI).
+  handle('ai:run', (req) => runWithFallback(settings(), req));
+  // konta AI (ChatGPT / Gemini / Claude) – instalacja, logowanie, stan
+  const accId = (id) => { if (!ACCOUNT_IDS.includes(id)) throw new Error('Nieznane konto AI.'); return id; };
+  handle('account:test', (id) => createProvider(accId(id), settings()).test());
+  handle('account:status', (id) => accounts.status(accId(id)));
+  handle('account:install', (id) => accounts.install(accId(id)));
+  handle('account:login', (id, mode) => accounts.startLogin(accId(id), ['auto', 'device', 'terminal'].includes(mode) ? mode : 'auto'));
+  handle('account:code', (id, code) => accounts.submitCode(accId(id), code));
+  handle('account:cancel', (id) => { accounts.cancelLogin(accId(id)); return true; });
+  handle('account:logout', (id) => accounts.logout(accId(id)));
+  handle('account:browse', async (id) => {
+    const def = DEFS[accId(id)];
+    const r = await dialog.showOpenDialog(win, { title: `Wskaż program ${def.program}`, properties: ['openFile'] });
     if (r.canceled || !r.filePaths[0]) return null;
-    if (!isClaudeBinary(r.filePaths[0])) throw new Error('To nie jest program Claude Code (oczekiwano pliku claude, claude.exe lub claude.cmd).');
+    if (!cliTools.isAllowedBinary(def, r.filePaths[0])) throw new Error(`To nie jest program ${def.program} (oczekiwano pliku ${def.cmd}, ${def.cmd}.exe lub ${def.cmd}.cmd).`);
     return r.filePaths[0];
   });
 
@@ -401,14 +417,20 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   applySettings();
-  account = new ClaudeAccount({ getSettings: settings, emit });
+  cliTools.refreshPath();
+  accounts = new Accounts({ getSettings: settings, emit });
   registerIpc();
   createWindow();
   if (!process.env.APP_SHOTS) createTray();
   app.on('activate', showWindow);
 });
 
-app.on('before-quit', () => { quitting = true; if (account) account.cancelLogin(); });
+app.on('before-quit', () => {
+  quitting = true;
+  if (accounts) accounts.cancelAll();
+  cliTools.killAll();
+  if (tray) { try { tray.destroy(); } catch (_) { /* ignore */ } }
+});
 app.on('window-all-closed', () => {
   if (!settings().app.runInBackground || !tray) app.quit();
 });

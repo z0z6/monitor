@@ -20,6 +20,6 @@ jobs:
       - name: Aplikacja Electron na prawdziwym internecie
         working-directory: app
         run: |
-          mkdir -p /tmp/md && echo '{"ai":{"provider":"rules"}}' > /tmp/md/settings.json
+          mkdir -p /tmp/md && echo '{"ai":{"provider":"codex","v":2}}' > /tmp/md/settings.json
           STEP="diag=$(node -e "process.stdout.write(encodeURIComponent(require('fs').readFileSync('../diag/steps.js','utf8')))")"
           MONITOR_DATA_DIR=/tmp/md APP_SHOTS=/tmp/shots APP_STEPS="$STEP" timeout 900 xvfb-run -a npx electron . --no-sandbox --disable-gpu 2>&1 | grep -v -i "dbus\|gpu\|libva\|viz" || true

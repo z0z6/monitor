@@ -15,7 +15,11 @@ const WD = ['niedziela', 'poniedziałek', 'wtorek', 'środa', 'czwartek', 'piąt
 const OPEN = new Set(['new', 'in_progress']);
 
 const SETTINGS_DEFAULTS = () => ({
-  ai: { provider: P.kind === 'desktop' ? 'claude-code' : 'gemini', model: 'sonnet', apiModel: 'claude-sonnet-5-5', geminiModel: 'gemini-3.5-flash', claudePath: '' },
+  ai: {
+    v: Engine.AI_SETTINGS_VERSION, provider: P.kind === 'desktop' ? 'codex' : 'gemini-api', fallback: true, order: [...Engine.ACCOUNT_IDS],
+    connected: {}, consent: {}, paths: {}, model: 'sonnet', codexModel: '', geminiModel: '',
+    apiModel: 'claude-sonnet-5-5', geminiApiModel: Engine.DEFAULT_GEMINI_MODEL,
+  },
   ui: { theme: 'system' },
   app: { autoScan: true, runInBackground: true, autostart: false, notifications: true },
   hints: {},
@@ -36,7 +40,9 @@ const state = {
   tasksRole: 'all',
   settingsTab: 'general',
   secrets: { anthropic: false, gemini: false },
-  claude: { status: null, login: null, installing: false, log: '', path: null },
+  accounts: {}, // stan kont AI z procesu głównego: { installed, loggedIn, path, version, email, plan }
+  acc: {}, // stan interfejsu kont: { installing, log, login, guide }
+  aiAdvanced: false,
   check: null,
   mobile: false,
 };
@@ -64,30 +70,39 @@ const chip = (text, color, ic) => h('span', { class: 'chip ' + (color || '') }, 
 const prioChip = (p) => chip(PRIORITY_LABEL[p] || p, PRIORITY_CHIP[p]);
 const wfChip = (w) => chip(WORKFLOW_LABEL[w] || w, WORKFLOW_CHIP[w]);
 
+const isAccount = (p) => Engine.ACCOUNT_IDS.includes(p);
 function aiReady() {
   const p = state.settings.ai.provider;
-  if (p === 'claude-code') return !!(state.claude.status && state.claude.status.loggedIn);
-  if (p === 'claude') return state.secrets.anthropic;
-  if (p === 'gemini') return state.secrets.gemini;
-  return true;
+  if (isAccount(p)) return P.kind === 'desktop' && !!(state.accounts[p] && state.accounts[p].loggedIn);
+  if (p === 'api') return state.secrets.anthropic;
+  if (p === 'gemini-api') return state.secrets.gemini;
+  return false;
 }
 function aiLabel() {
-  const p = state.settings.ai.provider;
-  return { 'claude-code': 'Konto Claude', claude: 'Claude (klucz API)', gemini: 'Gemini (klucz API)', rules: 'Bez AI' }[p] || p;
+  return Engine.AI_PROVIDERS[state.settings.ai.provider] || 'AI';
 }
 
 // ───────────────────────── dane ─────────────────────────
 async function loadSettings() {
   const raw = (await P.kvGet('settings')) || {};
   const d = SETTINGS_DEFAULTS();
-  state.settings = { ai: { ...d.ai, ...(raw.ai || {}) }, ui: { ...d.ui, ...(raw.ui || {}) }, app: { ...d.app, ...(raw.app || {}) }, hints: { ...(raw.hints || {}) } };
-  if (P.kind !== 'desktop' && state.settings.ai.provider === 'claude-code') state.settings.ai.provider = 'gemini';
+  // Ustawienia z wersji 1.0 (konto Claude, klucze API, tryb „Bez AI”) przechodzą na nowy układ kont AI.
+  const migrated = raw.ai && raw.ai.v !== Engine.AI_SETTINGS_VERSION;
+  const ai = { ...d.ai, ...Engine.migrateAiSettings(raw.ai, P.kind) };
+  state.settings = { ai, ui: { ...d.ui, ...(raw.ui || {}) }, app: { ...d.app, ...(raw.app || {}) }, hints: { ...(raw.hints || {}) } };
+  if (migrated) await P.kvSet('settings', state.settings).catch(() => {});
 }
 
 async function saveSettings(patch, quiet) {
   try {
     const s = state.settings;
-    for (const [k, v] of Object.entries(patch)) s[k] = { ...(s[k] || {}), ...v };
+    // Scalanie o jeden poziom głębiej dla słowników (connected, consent, paths), żeby zmiana jednego konta nie kasowała reszty.
+    const isDict = (x) => x && typeof x === 'object' && !Array.isArray(x);
+    for (const [k, v] of Object.entries(patch)) {
+      const cur = { ...(s[k] || {}) };
+      for (const [kk, vv] of Object.entries(v)) cur[kk] = isDict(vv) && isDict(cur[kk]) ? { ...cur[kk], ...vv } : vv;
+      s[k] = cur;
+    }
     await P.kvSet('settings', s);
     await P.settingsChanged();
     applyTheme();
@@ -141,7 +156,7 @@ async function init() {
   state.monitor = Engine.createMonitor({
     platform: {
       fetch: P.fetch, loadState: () => P.kvGet('state'), saveState: (json) => P.kvSet('state', json),
-      secret: P.secret, claudeCode: P.claudeCode, notify: (t, b) => { if (state.settings.app.notifications) P.notify(t, b); },
+      secret: P.secret, aiRun: P.aiRun, notify: (t, b) => { if (state.settings.app.notifications) P.notify(t, b); },
     },
     getSettings: () => state.settings,
   });
@@ -157,8 +172,13 @@ async function init() {
     document.querySelector('.titlebar').addEventListener('dblclick', (e) => { if (!e.target.closest('.traffic')) P.windowControl('maximize'); });
     window.addEventListener('blur', () => document.body.classList.add('window-blur'));
     window.addEventListener('focus', () => document.body.classList.remove('window-blur'));
-    P.on('claude:log', (t) => { state.claude.log = (state.claude.log + t).slice(-4000); const el = document.querySelector('.acc-log'); if (el) el.textContent = state.claude.log.split('\n').slice(-6).join('\n'); });
-    P.on('claude:login', onClaudeLogin);
+    P.on('account:log', ({ id, text }) => {
+      const A = accUi(id);
+      A.log = (A.log + text).slice(-4000);
+      const el = document.querySelector(`.acc-log[data-id="${id}"]`);
+      if (el) el.textContent = A.log.split('\n').slice(-6).join('\n');
+    });
+    P.on('account:login', onAccountLogin);
     P.on('scan:request', (r) => runScan(r && r.reason));
   }
   P.on('nav', (n) => go(n.view || 'changes'));
@@ -175,7 +195,7 @@ async function init() {
   document.getElementById('content').addEventListener('scroll', (e) => e.target.classList.toggle('scrolled', e.target.scrollTop > 4));
 
   render();
-  if (P.kind === 'desktop') await refreshClaude();
+  if (P.kind === 'desktop') await refreshAccounts();
   if (state.info.shots) return; // zrzuty ekranu: bez automatycznego skanu
   setTimeout(autoScan, P.kind === 'android' ? 2500 : 8000);
   setInterval(autoScan, 5 * 60 * 1000);
@@ -204,8 +224,8 @@ function onEngineEvent(ev) {
 
 async function runScan(reason = 'ręcznie') {
   if (state.scanning) { toast('Skan już trwa…', 'info', 2000); return; }
-  if (!aiReady() && state.settings.ai.provider !== 'rules') {
-    toast('Najpierw połącz AI w Ustawieniach → AI (albo wybierz tryb „Bez AI”).', 'error', 6000);
+  if (!aiReady()) {
+    toast(P.kind === 'desktop' ? 'Najpierw połącz konto AI (ChatGPT, Gemini albo Claude) w Ustawieniach → AI.' : 'Najpierw wpisz klucz API Gemini albo Claude w Ustawieniach → AI.', 'error', 6000);
     state.settingsTab = 'ai'; go('settings');
     return;
   }
@@ -317,13 +337,13 @@ function scanBanner() {
 
 function connectBanner() {
   if (aiReady()) return null;
-  const desk = P.kind === 'desktop' && state.settings.ai.provider === 'claude-code';
+  const desk = P.kind === 'desktop' && isAccount(state.settings.ai.provider);
   return h('div', { class: 'card connect-banner' },
     h('div', { class: 'acc-logo', html: icon('key', 22) }),
     h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { class: 'acc-title' }, desk ? 'Połącz aplikację z kontem Claude' : 'Podłącz analizę AI'),
+      h('div', { class: 'acc-title' }, desk ? 'Połącz konto AI' : 'Podłącz analizę AI'),
       h('div', { class: 'muted small' }, desk
-        ? 'Jedno kliknięcie: zainstaluję Claude Code i otworzę stronę logowania Claude. Potem każdy nowy akt dostanie streszczenie i zadania dla ról.'
+        ? 'Wystarczy darmowe konto ChatGPT albo Google (Gemini); Claude wymaga planu Pro. Zainstaluję oficjalny program i otworzę stronę logowania. Potem każdy nowy akt dostanie streszczenie i zadania dla ról.'
         : 'Wpisz klucz API Gemini (darmowy poziom Google AI Studio) albo Claude. Bez tego aplikacja nie przeanalizuje nowych aktów.')),
     h('button', { class: 'btn primary lg', onclick: () => { state.settingsTab = 'ai'; go('settings'); } }, desk ? 'Połącz' : 'Ustaw'));
 }
@@ -657,84 +677,298 @@ async function importBackup() {
   } catch (e) { errToast(e); }
 }
 
-// ── połączenie z kontem Claude (komputer) ──
-function onClaudeLogin(ev) {
-  const C = state.claude;
-  if (ev.stage === 'url' || ev.stage === 'code') { C.login = { ...(C.login || {}), stage: ev.stage, url: ev.url || (C.login && C.login.url) }; if (state.view === 'settings') render(); }
-  if (ev.stage === 'done') { C.login = null; C.status = ev.status; toast('Połączono z kontem Claude', 'success'); render(); }
-  if (ev.stage === 'error') { C.login = null; errToast(new Error(ev.error)); render(); }
+// ───────────────────────── KONTA AI ─────────────────────────
+// Trzy konta, jedno pod drugim (wzór: Asystent IPET). Domyślnie darmowe: ChatGPT i Google Gemini; Claude wymaga planu Pro.
+// Programy producentów działają tylko na komputerze; na telefonie zostają klucze API Claude i Gemini.
+const ACCOUNTS = [
+  {
+    id: 'codex', name: 'ChatGPT', vendor: 'OpenAI', program: 'Codex CLI', icon: 'sparkles', grad: 'linear-gradient(145deg, #1fc485, #0a7d55)', free: true,
+    plan: 'Wystarczy darmowe konto ChatGPT',
+    blurb: 'Modele GPT od OpenAI. Logujesz się na stronie OpenAI tym samym kontem co w ChatGPT.',
+    signup: 'https://chatgpt.com', dataUrl: 'https://chatgpt.com/#settings/DataControls',
+    install: { win: 'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"', unix: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' },
+    login: 'codex login', loginHint: 'Otworzy się strona logowania OpenAI – zaloguj się kontem ChatGPT.',
+  },
+  {
+    id: 'gemini', name: 'Google Gemini', vendor: 'Google', program: 'Antigravity CLI', icon: 'brain', grad: 'linear-gradient(145deg, #4f8cff, #8a5cff)', free: true,
+    plan: 'Wystarczy darmowe konto Google (Gmail)',
+    blurb: 'Modele Gemini od Google. Logujesz się na stronie Google swoim prywatnym kontem (Gmail).',
+    signup: 'https://accounts.google.com/signup', dataUrl: 'https://myaccount.google.com/data-and-privacy',
+    install: { win: 'powershell -ExecutionPolicy ByPass -c "irm https://antigravity.google/cli/install.ps1 | iex"', unix: 'curl -fsSL https://antigravity.google/cli/install.sh | bash' },
+    login: 'agy', loginHint: 'Uruchom program – otworzy się strona logowania Google. Po zalogowaniu wpisz /exit i naciśnij Enter.',
+  },
+  {
+    id: 'claude-code', name: 'Claude', vendor: 'Anthropic', program: 'Claude Code', icon: 'speech', grad: 'linear-gradient(145deg, #d97757, #b9532f)', free: false,
+    plan: 'Wymaga płatnego planu Claude Pro lub Max',
+    blurb: 'Modele Claude od Anthropic. Darmowe konto Claude nie obejmuje programu Claude Code.',
+    signup: 'https://claude.ai/upgrade', dataUrl: 'https://claude.ai/settings/data-privacy-controls',
+    install: { win: 'powershell -ExecutionPolicy ByPass -c "irm https://claude.ai/install.ps1 | iex"', unix: 'curl -fsSL https://claude.ai/install.sh | bash' },
+    login: 'claude auth login', loginHint: 'Otworzy się strona logowania Claude – zaloguj się kontem z planem Pro lub Max.',
+  },
+];
+const accDef = (id) => ACCOUNTS.find((a) => a.id === id) || { id, name: id, vendor: '', program: id };
+function accUi(id) { return (state.acc[id] = state.acc[id] || { installing: false, log: '', login: null, guide: false }); }
+const isWinPlatform = () => state.info && state.info.platform === 'win32';
+const isTyping = () => { const a = document.activeElement; return !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== 'checkbox'); };
+const rerenderSoft = () => { if (state.view === 'settings' || state.view === 'dashboard') { if (!isTyping()) render(); } };
+
+async function refreshAccounts(ids = ACCOUNTS.map((a) => a.id)) {
+  if (!P.accounts) return;
+  await Promise.all(ids.map(async (id) => {
+    try { state.accounts[id] = await P.accounts.status(id); } catch (_) { state.accounts[id] = { id, installed: false, loggedIn: false }; }
+  }));
+  await syncConnected();
+  rerenderSoft();
 }
 
-async function refreshClaude() {
-  if (!P.claude) return;
-  try { state.claude.status = await P.claude.status(); state.claude.path = await P.claude.path(); } catch (e) { state.claude.status = { installed: false, loggedIn: false }; }
-  render();
+// „Połączone konta” w ustawieniach (do przełączania przy limicie) zgodne z faktycznym stanem programów.
+async function syncConnected() {
+  const ai = state.settings.ai;
+  const conn = { ...(ai.connected || {}) };
+  const patch = {};
+  for (const d of ACCOUNTS) {
+    const st = state.accounts[d.id];
+    if (!st) continue;
+    if (!!conn[d.id] !== !!st.loggedIn) { conn[d.id] = !!st.loggedIn; patch.connected = { ...(patch.connected || {}), [d.id]: !!st.loggedIn }; }
+  }
+  // wybrane konto nie jest połączone, a inne jest – używamy połączonego
+  if (isAccount(ai.provider) && !conn[ai.provider]) {
+    const next = ACCOUNTS.find((d) => conn[d.id]);
+    if (next) patch.provider = next.id;
+  }
+  if (Object.keys(patch).length) await saveSettings({ ai: patch }, true);
 }
 
-async function installAndLogin() {
-  const C = state.claude;
-  C.installing = true; C.log = ''; render();
-  try {
-    C.status = await P.claude.install();
-    C.installing = false; render();
-    if (C.status.installed && !C.status.loggedIn) await startLogin();
-  } catch (e) { C.installing = false; errToast(e); render(); }
+function onAccountLogin(ev) {
+  const A = accUi(ev.id);
+  if (ev.stage === 'done') {
+    A.login = null;
+    const def = accDef(ev.id);
+    // Antigravity CLI nie ma polecenia „status”: udane logowanie zapamiętujemy w ustawieniach
+    const after = ev.id === 'gemini' ? saveSettings({ ai: { connected: { gemini: true } } }, true) : Promise.resolve();
+    after.then(() => refreshAccounts([ev.id])).then(() => toast(`Połączono z kontem ${def.name}`, 'success'));
+    return;
+  }
+  if (ev.stage === 'error') { A.login = null; errToast(new Error(ev.error)); render(); return; }
+  A.login = { ...(A.login || {}), stage: ev.stage, mode: ev.mode, url: ev.url || (A.login && A.login.url), code: ev.code || (A.login && A.login.code) };
+  if (state.view === 'settings') render();
 }
 
-async function startLogin() {
-  const C = state.claude;
-  try { C.login = { stage: 'start' }; render(); await P.claude.login(); } catch (e) { C.login = null; errToast(e); render(); }
+function copyText(t) {
+  try { navigator.clipboard.writeText(t); toast('Skopiowano', 'success', 1400); } catch (_) { toast('Zaznacz i skopiuj tekst ręcznie', 'info'); }
 }
 
-function accountCard() {
-  const C = state.claude;
-  const st = C.status;
-  const wrap = h('div', { class: 'account' });
-  if (!st) { wrap.append(h('div', { class: 'acc-row' }, spinner(18), h('span', { class: 'muted' }, 'Sprawdzam połączenie z kontem Claude…'))); return wrap; }
-  const logo = (cls) => h('div', { class: 'acc-logo ' + (cls || ''), html: icon(st.loggedIn ? 'checkCircle' : 'person', 24) });
-  if (st.loggedIn) {
-    wrap.append(h('div', { class: 'acc-row' }, logo('ok'),
-      h('div', { style: { flex: 1 } },
-        h('div', { class: 'acc-title' }, 'Połączono z kontem Claude'),
-        h('div', { class: 'muted small' }, [st.email, st.plan ? `plan ${st.plan}` : null].filter(Boolean).join(' · ') || 'Analizy korzystają z Twojego planu Claude.')),
-      h('button', { class: 'btn', onclick: (e) => busy(e.currentTarget, testAi, 'Testuję…') }, iconEl('bolt', 14), 'Testuj'),
-      h('button', { class: 'btn danger', onclick: async () => { try { C.status = await P.claude.logout(); render(); } catch (er) { errToast(er); } } }, 'Wyloguj')));
+function cmdBox(text) {
+  return h('div', { class: 'cmd-box' }, h('code', null, text), h('button', { class: 'btn sm', onclick: () => copyText(text) }, iconEl('copy', 12), 'Kopiuj'));
+}
+
+function accLogo(def, ok) {
+  return h('div', { class: 'acc-logo', style: { background: def.grad } }, h('span', { html: icon(def.icon, 22) }), ok ? h('span', { class: 'acc-badge', html: icon('check', 10) }) : null);
+}
+
+function accountCard(def) {
+  const st = state.accounts[def.id];
+  const A = accUi(def.id);
+  const ai = state.settings.ai;
+  const active = ai.provider === def.id;
+  const connected = !!(st && st.loggedIn);
+  const chips = [
+    def.free ? h('span', { class: 'chip green' }, 'bezpłatnie') : h('span', { class: 'chip orange' }, 'płatny plan'),
+    active && connected ? h('span', { class: 'chip blue' }, 'używane do analizy') : null,
+  ];
+  const head = (sub, ...buttons) => h('div', { class: 'acc-row' }, accLogo(def, connected),
+    h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { class: 'acc-title' }, def.name, ...chips), h('div', { class: 'muted small' }, sub)),
+    ...buttons);
+  const wrap = h('div', { class: 'account' + (active && connected ? ' active' : '') });
+
+  if (!st) { wrap.append(head('Sprawdzam połączenie…', spinner(16))); return wrap; }
+
+  if (A.installing) {
+    wrap.append(head(`Instaluję ${def.program} od ${def.vendor}… (ok. 1 minuty)`, spinner(18)),
+      h('pre', { class: 'acc-log', 'data-id': def.id }, (A.log || '').split('\n').slice(-6).join('\n')));
     return wrap;
   }
-  if (!st.installed) {
-    wrap.append(h('div', { class: 'acc-row' }, logo(),
-      h('div', { style: { flex: 1 } },
-        h('div', { class: 'acc-title' }, 'Połącz aplikację ze swoim kontem Claude'),
-        h('div', { class: 'muted small' }, 'Jednorazowo zainstaluję oficjalny program Claude Code od Anthropic (ok. 1 minuty), a potem otworzę stronę logowania Claude.')),
-      h('button', { class: 'btn primary lg', disabled: C.installing || null, onclick: installAndLogin }, C.installing ? spinner(14) : iconEl('download', 15), C.installing ? 'Instaluję…' : 'Zainstaluj i połącz')));
-    if (C.installing || C.log) wrap.append(h('pre', { class: 'acc-log' }, (C.log || '').split('\n').slice(-6).join('\n')));
+
+  if (A.login) { wrap.append(head(def.plan), loginPanel(def, A.login)); return wrap; }
+
+  if (connected) {
+    const who = [st.email, st.plan ? `plan ${st.plan}` : null, st.method ? `logowanie: ${st.method}` : null].filter(Boolean).join(' · ');
+    wrap.append(head(`Połączono${who ? ' · ' + who : ''}`,
+      !active ? h('button', { class: 'btn', onclick: async () => { await saveSettings({ ai: { provider: def.id } }, true); toast(`Analiza korzysta teraz z konta ${def.name}`, 'success'); render(); } }, 'Używaj') : null,
+      h('button', { class: 'btn', onclick: (e) => busy(e.currentTarget, async () => { try { toast(await P.accounts.test(def.id), 'success', 6000); } catch (er) { errToast(er); } }, 'Testuję…') }, iconEl('bolt', 13), 'Testuj'),
+      h('button', { class: 'btn danger', onclick: () => disconnectAccount(def) }, 'Odłącz')));
     return wrap;
   }
-  const L = C.login;
-  if (!L) {
-    wrap.append(h('div', { class: 'acc-row' }, logo(),
-      h('div', { style: { flex: 1 } },
-        h('div', { class: 'acc-title' }, 'Zaloguj się swoim kontem Claude'),
-        h('div', { class: 'muted small' }, 'Otworzy się strona logowania Claude w przeglądarce. Zaloguj się tak samo jak na claude.ai.')),
-      h('button', { class: 'btn primary lg', onclick: startLogin }, iconEl('key', 15), 'Zaloguj się')));
-    return wrap;
+
+  wrap.append(head(`${def.plan}. ${st.installed ? `Program ${def.program} jest zainstalowany – wystarczy się zalogować.` : def.blurb}`,
+    h('button', { class: 'btn primary', onclick: () => connectAccount(def) }, iconEl('key', 13), 'Połącz')));
+  if (A.guide) wrap.append(guidePanel(def));
+  else {
+    wrap.append(h('div', { class: 'acc-sub' }, h('div', { class: 'acc-links', style: { marginTop: 0 } },
+      h('button', { class: 'btn plain sm', onclick: () => { A.guide = true; render(); } }, iconEl('list', 12), 'Poprowadź mnie krok po kroku'),
+      h('button', { class: 'btn plain sm', onclick: () => P.openExternal(def.signup) }, iconEl('globe', 12), def.free ? 'Nie mam konta – załóż bezpłatnie' : 'Plany Claude'))));
   }
-  const code = h('input', { class: 'input', style: { flex: 1 }, placeholder: 'Wklej kod ze strony logowania (jeśli się pojawił)' });
-  wrap.append(
-    h('div', { class: 'acc-row' }, h('div', { class: 'acc-logo' }, spinner(20)),
-      h('div', { style: { flex: 1 } },
-        h('div', { class: 'acc-title' }, 'Czekam na zalogowanie w przeglądarce…'),
-        h('div', { class: 'muted small' }, 'Zaloguj się na stronie Claude, która otworzyła się w przeglądarce. Po zalogowaniu aplikacja połączy się sama.')),
-      h('button', { class: 'btn', onclick: async () => { await P.claude.cancel(); C.login = null; render(); } }, 'Anuluj')),
-    h('div', { class: 'acc-sub' },
-      L.url ? h('button', { class: 'btn plain sm', onclick: () => P.openExternal(L.url) }, iconEl('globe', 12), 'Przeglądarka się nie otworzyła? Otwórz stronę logowania') : null,
-      h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } }, code,
-        h('button', { class: 'btn primary', onclick: async () => { if (!code.value.trim()) return; try { await P.claude.submit(code.value); toast('Przekazano kod, trwa łączenie…', 'info', 3000); } catch (er) { errToast(er); } } }, 'Zatwierdź kod'))));
   return wrap;
 }
 
-async function testAi() {
-  try { const r = await state.monitor.testAi(); toast(r, 'success', 7000); } catch (e) { errToast(e); }
+function loginPanel(def, L) {
+  const A = accUi(def.id);
+  const cancel = h('button', { class: 'btn', onclick: async () => { await P.accounts.cancel(def.id).catch(() => {}); A.login = null; render(); } }, 'Anuluj');
+  const waiting = (title, sub) => h('div', { class: 'acc-row acc-wait' }, h('div', { class: 'acc-spin' }, spinner(18)), h('div', { style: { flex: 1 } }, h('div', { class: 'acc-title' }, title), h('div', { class: 'muted small' }, sub)), cancel);
+
+  if (L.stage === 'terminal' || L.mode === 'terminal') {
+    return h('div', { class: 'acc-sub' },
+      waiting('Logowanie w okienku terminala…', def.id === 'gemini'
+        ? 'Otworzyłem małe okno logowania i stronę Google w przeglądarce. Zaloguj się kontem Google. Jeśli strona pokaże kod – wklej go w okienku terminala i naciśnij Enter. Aplikacja połączy się sama.'
+        : `Otworzyłem okno logowania ${def.name}. Zaloguj się w przeglądarce; jeśli strona pokaże kod – wklej go w okienku i naciśnij Enter.`),
+      h('p', { class: 'muted small', style: { marginTop: '8px' } }, 'Nie widzisz okienka? Sprawdź pasek zadań albo wybierz „Poprowadź mnie krok po kroku”.'));
+  }
+
+  if (L.stage === 'device' || L.mode === 'device') {
+    return h('div', { class: 'acc-sub' },
+      waiting('Logowanie kodem…', 'Otwórz stronę OpenAI, zaloguj się i wpisz poniższy kod. Aplikacja połączy się sama.'),
+      h('div', { class: 'device-box' },
+        h('div', null, h('div', { class: 'muted small' }, '1. Otwórz stronę'), h('button', { class: 'btn sm', disabled: L.url ? null : true, onclick: () => P.openExternal(L.url) }, iconEl('globe', 12), L.url ? 'Otwórz stronę logowania' : 'czekam na adres…')),
+        h('div', null, h('div', { class: 'muted small' }, '2. Wpisz kod'), L.code ? h('div', { class: 'device-code' }, L.code, h('button', { class: 'btn sm', onclick: () => copyText(L.code) }, iconEl('copy', 12), 'Kopiuj')) : spinner(14))));
+  }
+
+  const parts = [waiting('Czekam na zalogowanie w przeglądarce…', `${def.loginHint} Aplikacja połączy się sama.`)];
+  const links = [];
+  if (L.url) links.push(h('button', { class: 'btn plain sm', onclick: () => P.openExternal(L.url) }, iconEl('globe', 12), 'Przeglądarka się nie otworzyła? Otwórz stronę logowania'));
+  if (def.id === 'codex') links.push(h('button', { class: 'btn plain sm', onclick: () => startAccountLogin(def, 'device') }, iconEl('key', 12), 'Nie działa? Zaloguj się kodem'));
+  if (links.length) parts.push(h('div', { class: 'acc-links' }, links));
+  if (def.id === 'claude-code') {
+    const code = h('input', { class: 'input', style: { flex: 1 }, placeholder: 'Wklej kod ze strony logowania (jeśli się pojawił)' });
+    parts.push(h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', width: '100%' } }, code,
+      h('button', { class: 'btn primary', onclick: async () => { if (!code.value.trim()) return; try { await P.accounts.code(def.id, code.value); toast('Przekazano kod – trwa łączenie…', 'info', 3000); } catch (er) { errToast(er); } } }, 'Zatwierdź kod')));
+  }
+  return h('div', { class: 'acc-sub' }, parts);
+}
+
+function guidePanel(def) {
+  const A = accUi(def.id);
+  const win = isWinPlatform();
+  const st = state.accounts[def.id] || {};
+  const step = (n, title, body) => h('div', { class: 'guide-step' + (n === 3 && st.installed ? ' done' : '') },
+    h('div', { class: 'guide-num' }, n === 3 && st.installed ? h('span', { html: icon('check', 12) }) : String(n)),
+    h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { class: 'guide-title' }, title), body || null));
+  return h('div', { class: 'acc-guide' },
+    h('div', { class: 'guide-head' }, h('b', null, `Połączenie z ${def.name} krok po kroku`), h('div', { class: 'spacer' }), h('button', { class: 'btn plain sm', onclick: () => { A.guide = false; render(); } }, 'Zwiń')),
+    step(1, def.free ? `Załóż bezpłatne konto ${def.vendor}, jeśli go nie masz.` : 'Upewnij się, że masz plan Claude Pro lub Max.', h('button', { class: 'btn sm', onclick: () => P.openExternal(def.signup) }, iconEl('globe', 12), 'Otwórz stronę')),
+    step(2, win ? 'Otwórz PowerShell: kliknij prawym przyciskiem menu Start i wybierz „Terminal”.' : 'Otwórz Terminal (Ctrl+Alt+T).'),
+    step(3, st.installed ? `${def.program} jest już zainstalowany.` : `Wklej polecenie instalacji ${def.program} i naciśnij Enter:`, st.installed ? null : cmdBox(win ? def.install.win : def.install.unix)),
+    step(4, win ? 'Zamknij i otwórz Terminal ponownie, a potem wpisz polecenie logowania:' : 'Wpisz polecenie logowania:', h('div', null, cmdBox(def.login), h('div', { class: 'muted small', style: { marginTop: '4px' } }, def.loginHint))),
+    step(5, 'Wróć tutaj i sprawdź połączenie.', h('div', { class: 'guide-actions' },
+      h('button', { class: 'btn primary sm', onclick: (e) => busy(e.currentTarget, () => checkAccount(def), 'Sprawdzam…') }, iconEl('checkCircle', 12), 'Sprawdź połączenie'),
+      st.installed ? h('button', { class: 'btn sm', onclick: () => startAccountLogin(def, 'terminal') }, 'Otwórz logowanie w okienku') : null,
+      h('button', { class: 'btn plain sm', onclick: () => browseProgram(def) }, iconEl('folder', 12), 'Wskaż program…'))));
+}
+
+async function browseProgram(def) {
+  try {
+    const f = await P.accounts.browse(def.id);
+    if (!f) return;
+    await saveSettings({ ai: { paths: { [def.id]: f } } }, true);
+    await refreshAccounts([def.id]);
+  } catch (e) { errToast(e); }
+}
+
+async function checkAccount(def) {
+  await refreshAccounts([def.id]);
+  let st = state.accounts[def.id];
+  if (st && st.installed && !st.loggedIn && def.id === 'gemini') {
+    // Antigravity CLI nie ma polecenia „status” – krótkie zapytanie testowe potwierdza logowanie
+    try { await P.accounts.test('gemini'); await saveSettings({ ai: { connected: { gemini: true } } }, true); await refreshAccounts(['gemini']); st = state.accounts.gemini; } catch (_) { /* niezalogowany */ }
+  }
+  if (!st || !st.installed) toast(`Nie znaleziono programu ${def.program}. Zainstaluj go (krok 3) albo wskaż jego plik.`, 'error', 7000);
+  else if (!st.loggedIn) toast(`${def.program} jest zainstalowany, ale nie jesteś zalogowany (krok 4).`, 'info', 7000);
+  else { accUi(def.id).guide = false; toast(`Połączono z kontem ${def.name}`, 'success'); render(); }
+}
+
+function connectAccount(def) {
+  const consent = (state.settings.ai.consent || {})[def.id];
+  if (consent) return runConnect(def);
+  const installed = (state.accounts[def.id] || {}).installed;
+  const chk = h('input', { type: 'checkbox' });
+  const goBtn = h('button', { class: 'btn primary', disabled: true }, iconEl('bolt', 13), installed ? 'Połącz' : 'Zainstaluj i połącz');
+  chk.addEventListener('change', () => { goBtn.disabled = !chk.checked; });
+  let sh = null;
+  const guideBtn = h('button', { class: 'btn', onclick: () => { sh.close(); accUi(def.id).guide = true; render(); } }, iconEl('list', 13), 'Poprowadź mnie krok po kroku');
+  sh = sheet({
+    title: `Połącz z kontem ${def.name}`,
+    subtitle: def.plan,
+    body: h('div', { class: 'consent' },
+      h('p', null, `Do połączenia potrzebny jest oficjalny, bezpłatny program ${def.program} od ${def.vendor}. Mogę zrobić wszystko za Ciebie albo poprowadzić Cię krok po kroku.`),
+      h('div', { class: 'consent-box' },
+        h('div', { class: 'consent-title' }, iconEl('wand', 14), 'Zrób to za mnie'),
+        h('ol', { class: 'steps-list' },
+          installed ? null : h('li', null, `Pobiorę i zainstaluję ${def.program} z oficjalnej strony ${def.vendor} – do Twojego folderu użytkownika, bez uprawnień administratora (ok. 1 minuty).`),
+          h('li', null, def.id === 'gemini' ? 'Otworzę małe okienko logowania i stronę Google w przeglądarce – zalogujesz się swoim kontem Google.' : `Otworzę stronę logowania ${def.vendor} w przeglądarce – zalogujesz się swoim kontem.`),
+          h('li', null, 'Sprawdzę połączenie i ustawię to konto do analizy aktów.')),
+        h('label', { class: 'consent-check' }, chk, h('span', null, `Zgadzam się, aby aplikacja ${installed ? '' : `zainstalowała ${def.program} i `}przeprowadziła logowanie w moim imieniu.`))),
+      h('div', { class: 'consent-note' }, iconEl('shield', 14), h('div', null,
+        h('b', null, 'Twoje dane. '), `Hasło wpisujesz tylko na stronie ${def.vendor} – aplikacja go nie widzi i nie przechowuje. Do ${def.vendor} trafiają wyłącznie publiczne akty prawne i opis placówki z Ustawień, nigdy dane uczniów ani pracowników. `,
+        def.free ? 'Na darmowych kontach dostawca może wykorzystywać przesłane treści do ulepszania modeli – możesz to wyłączyć w ' : 'Możesz sprawdzić ',
+        h('a', { href: '#', onclick: (e) => { e.preventDefault(); P.openExternal(def.dataUrl); } }, 'ustawieniach prywatności konta'), '.')),
+      h('div', { class: 'consent-actions' }, guideBtn, h('div', { class: 'spacer' }), goBtn)),
+  });
+  goBtn.addEventListener('click', async () => {
+    sh.close();
+    await saveSettings({ ai: { consent: { [def.id]: new Date().toISOString() } } }, true);
+    runConnect(def);
+  });
+}
+
+async function runConnect(def) {
+  const A = accUi(def.id);
+  A.guide = false;
+  let st = state.accounts[def.id];
+  try {
+    if (!st || !st.installed) {
+      A.installing = true; A.log = ''; render();
+      st = state.accounts[def.id] = await P.accounts.install(def.id);
+      A.installing = false;
+    }
+    if (st.loggedIn) { await syncConnected(); render(); return; }
+    await startAccountLogin(def, 'auto');
+  } catch (e) { A.installing = false; A.login = null; errToast(e); render(); }
+}
+
+async function startAccountLogin(def, mode) {
+  const A = accUi(def.id);
+  try {
+    if (A.login) await P.accounts.cancel(def.id).catch(() => {});
+    A.login = { stage: 'start', mode: def.id === 'gemini' ? 'terminal' : mode };
+    render();
+    await P.accounts.login(def.id, mode);
+  } catch (e) { A.login = null; errToast(e); render(); }
+}
+
+function disconnectAccount(def) {
+  sheet({
+    title: `Odłączyć konto ${def.name}?`,
+    body: h('p', { class: 'muted' }, def.id === 'gemini'
+      ? 'Aplikacja przestanie korzystać z tego konta. Aby całkowicie wylogować program Antigravity CLI, uruchom w terminalu „agy” i wpisz /logout.'
+      : `Program ${def.program} zostanie wylogowany z Twojego konta. Zmiany prawa i raporty pozostaną bez zmian.`),
+    actions: [{ label: 'Anuluj' }, { label: 'Odłącz', kind: 'danger', onClick: async () => {
+      try {
+        await P.accounts.logout(def.id);
+        await saveSettings({ ai: { connected: { [def.id]: false } } }, true);
+        await refreshAccounts([def.id]);
+        render();
+      } catch (e) { errToast(e); }
+    } }],
+  });
+}
+
+function aiTestRow() {
+  const status = h('div', { class: 'status-line' });
+  const testBtn = h('button', { class: 'btn' }, iconEl('bolt', 14), 'Testuj analizę');
+  testBtn.addEventListener('click', () => busy(testBtn, async () => {
+    status.className = 'status-line'; status.replaceChildren(spinner(12), ' Analizuję przykładowy akt…');
+    try { const r = await state.monitor.testAi(); status.className = 'status-line ok'; status.replaceChildren(iconEl('checkCircle', 14), r); } catch (e) { status.className = 'status-line bad'; status.replaceChildren(iconEl('warn', 14), e.message); }
+  }, 'Testuję…'));
+  return h('div', { class: 'group', style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } }, testBtn, status);
 }
 
 function keyRow(name, label, placeholder, url) {
@@ -749,41 +983,88 @@ function keyRow(name, label, placeholder, url) {
   ];
 }
 
-function settingsAi() {
+function apiKeyGroups() {
   const s = state.settings;
-  const p = s.ai.provider;
-  const providers = [
-    P.kind === 'desktop' ? { value: 'claude-code', label: 'Konto Claude' } : null,
-    { value: 'claude', label: 'Klucz Claude' },
-    { value: 'gemini', label: 'Gemini' },
-    { value: 'rules', label: 'Bez AI' },
-  ].filter(Boolean);
-  const testBtn = h('button', { class: 'btn' }, iconEl('bolt', 14), 'Testuj połączenie');
-  testBtn.addEventListener('click', () => busy(testBtn, testAi, 'Testuję…'));
-  return h('div', null,
-    group('Sposób analizy', [
-      row('Dostawca', segmented(providers, p, async (v) => { await saveSettings({ ai: { provider: v } }, true); if (v === 'claude-code') refreshClaude(); render(); }), { icon: 'cpu', color: 'var(--accent)' }),
-    ], {
-      'claude-code': 'Aplikacja uruchamia oficjalny program Claude Code zalogowany Twoim kontem (Pro/Max). Nie widzi hasła ani tokenów logowania.',
-      claude: 'Klucz API z platform.claude.com, rozliczany za faktyczne zużycie (grosze za akt), niezależnie od planu Claude.',
-      gemini: 'Darmowy poziom Google AI Studio (bez karty). Google może używać wysyłanych treści do ulepszania usług, dlatego do analizy trafiają wyłącznie publiczne akty prawne.',
-      rules: 'Bez AI i bez kosztów: tylko dopasowanie słów kluczowych i terminy z metadanych, bez streszczeń.',
-    }[p]),
-    p === 'claude-code' ? h('div', { class: 'group' }, h('h3', { class: 'group-title' }, 'Konto Claude'), h('div', { class: 'group-body' }, accountCard())) : null,
-    p === 'claude-code' ? group('Model', [
-      row('Model Claude', select([{ value: 'sonnet', label: 'Sonnet (zalecany)' }, { value: 'opus', label: 'Opus (najmocniejszy)' }, { value: 'haiku', label: 'Haiku (najszybszy)' }], s.ai.model, (v) => saveSettings({ ai: { model: v } })), { icon: 'sparkles', color: 'var(--purple)' }),
-      row('Program Claude Code', h('div', { class: 'btn-row' }, h('span', { class: 'path', style: { maxWidth: '260px' } }, state.claude.path || 'nie znaleziono'),
-        h('button', { class: 'btn sm', onclick: async () => { const f = await P.claude.browse(); if (f) { await saveSettings({ ai: { claudePath: f } }, true); await refreshClaude(); } } }, 'Wskaż…')), { icon: 'folder', color: 'var(--orange)' }),
-    ]) : null,
-    p === 'claude' ? group('Klucz API Claude', [
+  const where = P.kind === 'desktop' ? 'Klucz jest szyfrowany przez system i nigdy nie trafia do okna aplikacji.' : 'Klucz jest zapisany tylko w pamięci tej aplikacji na telefonie.';
+  return [
+    group('Klucz API Gemini (darmowy poziom Google AI Studio)', [
+      ...keyRow('gemini', 'Klucz', 'AIza…', 'https://aistudio.google.com/apikey'),
+      row('Model', textInput(s.ai.geminiApiModel, (v) => saveSettings({ ai: { geminiApiModel: v.trim() || Engine.DEFAULT_GEMINI_MODEL } }), { width: '220px' }), { icon: 'sparkles', color: 'var(--purple)' }),
+    ], `${where} Nie włączaj płatności w Google Cloud: bez niej przekroczenie darmowego limitu kończy się błędem, a nie opłatą.`),
+    group('Klucz API Claude (płatny, rozliczany za zużycie)', [
       ...keyRow('anthropic', 'Klucz', 'sk-ant-…', 'https://platform.claude.com/settings/keys'),
       row('Model', select([{ value: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5 (zalecany)' }, { value: 'claude-opus-5-5', label: 'Claude Opus 5.5' }, { value: 'claude-haiku-5-5', label: 'Claude Haiku 5.5 (najtańszy)' }], s.ai.apiModel, (v) => saveSettings({ ai: { apiModel: v } })), { icon: 'sparkles', color: 'var(--purple)' }),
-    ], P.kind === 'desktop' ? 'Klucz jest szyfrowany przez system i nigdy nie trafia do okna aplikacji.' : 'Klucz jest zapisany tylko w pamięci tej aplikacji na telefonie.') : null,
-    p === 'gemini' ? group('Klucz API Gemini', [
-      ...keyRow('gemini', 'Klucz', 'AIza…', 'https://aistudio.google.com/apikey'),
-      row('Model', textInput(s.ai.geminiModel, (v) => saveSettings({ ai: { geminiModel: v.trim() || 'gemini-3.5-flash' } }), { width: '220px' }), { icon: 'sparkles', color: 'var(--purple)' }),
-    ], 'Nie włączaj płatności w Google Cloud: bez niej przekroczenie darmowego limitu kończy się błędem, a nie opłatą.') : null,
-    p !== 'rules' && p !== 'claude-code' ? h('div', { class: 'group', style: { display: 'flex', alignItems: 'center', gap: '12px' } }, testBtn) : null);
+    ], where),
+  ];
+}
+
+function orderRows() {
+  const ai = state.settings.ai;
+  const order = Engine.migrateAiSettings(ai, P.kind).order;
+  const move = async (i, d) => {
+    const next = order.slice();
+    [next[i], next[i + d]] = [next[i + d], next[i]];
+    await saveSettings({ ai: { order: next } }, true);
+    render();
+  };
+  return order.map((id, i) => {
+    const def = accDef(id);
+    const st = state.accounts[id] || {};
+    return row(`${i + 1}. ${def.name}`, h('div', { class: 'btn-row' },
+      h('span', { class: 'muted small' }, st.loggedIn ? 'połączone' : 'niepołączone'),
+      h('button', { class: 'icon-btn', title: 'W górę', disabled: i === 0 ? true : null, onclick: () => move(i, -1), html: icon('arrowUp', 14) }),
+      h('button', { class: 'icon-btn', title: 'W dół', disabled: i === order.length - 1 ? true : null, onclick: () => move(i, 1), html: icon('arrowDown', 14) })),
+    { icon: def.icon, color: def.grad });
+  });
+}
+
+function settingsAi() {
+  const s = state.settings;
+
+  if (P.kind !== 'desktop') {
+    const p = s.ai.provider === 'api' ? 'api' : 'gemini-api';
+    return h('div', null,
+      group('Sposób analizy', [
+        row('Analizuj przez', segmented([{ value: 'gemini-api', label: 'Klucz Gemini' }, { value: 'api', label: 'Klucz Claude' }], p, async (v) => { await saveSettings({ ai: { provider: v } }, true); render(); }), { icon: 'cpu', color: 'var(--accent)' }),
+      ], 'Konta ChatGPT, Gemini i Claude łączy się w wersji na komputer (Windows, Linux). Na telefonie analizę wykonuje klucz API. Do modelu trafiają wyłącznie publiczne akty prawne.'),
+      ...apiKeyGroups(),
+      aiTestRow());
+  }
+
+  const anyConnected = ACCOUNTS.some((d) => state.accounts[d.id] && state.accounts[d.id].loggedIn);
+  const usingKey = !isAccount(s.ai.provider);
+  return h('div', null,
+    h('section', { class: 'group' },
+      h('h3', { class: 'group-title' }, 'Konta AI – połącz jedno lub kilka'),
+      h('div', { class: 'group-body acc-list' }, ACCOUNTS.map(accountCard)),
+      h('p', { class: 'group-footer' }, 'Kliknij „Połącz”: za Twoją zgodą aplikacja zainstaluje oficjalny program producenta i otworzy logowanie, albo poprowadzi Cię krok po kroku. Programy działają bez dostępu do plików na komputerze; do AI trafiają wyłącznie publiczne akty prawne i opis placówki.')),
+    usingKey ? h('div', { class: 'connect-banner card' }, iconEl('key', 18), h('div', { style: { flex: 1 } },
+      h('b', null, `Analiza korzysta z klucza: ${aiLabel()}`),
+      h('div', { class: 'muted small' }, 'Zmienisz to w ustawieniach zaawansowanych albo klikając „Używaj” przy połączonym koncie.'))) : null,
+    group('Działanie', [
+      row('Gdy skończy się limit, użyj kolejnego połączonego konta', toggle(s.ai.fallback !== false, (v) => saveSettings({ ai: { fallback: v } }, true)), { icon: 'refresh', color: 'var(--indigo)', hint: 'Darmowe konta mają limity dzienne lub tygodniowe. Po ich wyczerpaniu skan sam przełączy się na następne połączone konto (kolejność w ustawieniach zaawansowanych).' }),
+    ]),
+    anyConnected || usingKey ? aiTestRow() : null,
+    h('div', { class: 'group' }, h('button', { class: 'btn plain sm', onclick: () => { state.aiAdvanced = !state.aiAdvanced; render(); } }, iconEl(state.aiAdvanced ? 'chevronL' : 'chevronR', 12), state.aiAdvanced ? 'Ukryj ustawienia zaawansowane' : 'Ustawienia zaawansowane')),
+    state.aiAdvanced ? h('div', null,
+      group('Kolejność kont przy przełączaniu', orderRows()),
+      group('Modele', [
+        row('ChatGPT', textInput(s.ai.codexModel, (v) => saveSettings({ ai: { codexModel: v.trim() } }), { width: '200px', placeholder: 'domyślny dla konta' }), { icon: 'sparkles', color: '#10a37f', hint: 'Zostaw puste – darmowe konto użyje dostępnego modelu.' }),
+        row('Google Gemini', textInput(s.ai.geminiModel, (v) => saveSettings({ ai: { geminiModel: v.trim() } }), { width: '200px', placeholder: 'automatyczny' }), { icon: 'brain', color: '#6b74ff', hint: 'Listę modeli pokazuje polecenie „agy models”.' }),
+        row('Claude', select([{ value: 'sonnet', label: 'Sonnet (zalecany)' }, { value: 'opus', label: 'Opus (najdokładniejszy)' }, { value: 'haiku', label: 'Haiku (najszybszy)' }], s.ai.model, (v) => saveSettings({ ai: { model: v } })), { icon: 'speech', color: '#d97757' }),
+      ]),
+      group('Programy na tym komputerze', ACCOUNTS.map((d) => {
+        const st = state.accounts[d.id] || {};
+        return row(d.program, h('div', { class: 'btn-row' }, st.path ? h('span', { class: 'path', style: { maxWidth: '300px' } }, st.path) : h('span', { class: 'muted small' }, 'nie znaleziono'),
+          h('button', { class: 'btn sm', onclick: () => browseProgram(d) }, 'Wskaż…')), { icon: 'folder', color: 'var(--orange)', hint: st.version || null });
+      })),
+      group('Klucz API zamiast konta', [
+        row('Analizuj przez', segmented([{ value: 'account', label: 'Konto AI' }, { value: 'gemini-api', label: 'Klucz Gemini' }, { value: 'api', label: 'Klucz Claude' }], usingKey ? s.ai.provider : 'account', async (v) => {
+          const next = v !== 'account' ? v : (ACCOUNTS.find((d) => state.accounts[d.id] && state.accounts[d.id].loggedIn) || ACCOUNTS[0]).id;
+          await saveSettings({ ai: { provider: next } }, true); render();
+        }), { icon: 'cpu', color: 'var(--accent)', hint: 'Klucz API przydaje się, gdy nie chcesz instalować programów producentów albo konta mają wyczerpane limity.' }),
+      ]),
+      ...apiKeyGroups()) : null);
 }
 
 function settingsScan() {

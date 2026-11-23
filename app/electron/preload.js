@@ -19,21 +19,21 @@ contextBridge.exposeInMainWorld('desktop', {
   setSecret: (name, value) => call('secret:set', name, value),
   fetch: (url, opts) => call('http:fetch', url, opts),
   notify: (title, body) => call('notify', title, body),
-  claudeCode: (req) => call('ai:claudeCode', req),
-  claudeStatus: () => call('claude:status'),
-  claudeInstall: () => call('claude:install'),
-  claudeLogin: () => call('claude:login'),
-  claudeCodeSubmit: (code) => call('claude:code', code),
-  claudeCancel: () => call('claude:cancel'),
-  claudeLogout: () => call('claude:logout'),
-  claudePath: () => call('claude:path'),
-  claudeBrowse: () => call('claude:browse'),
+  aiRun: (req) => call('ai:run', req),
+  accountTest: (id) => call('account:test', id),
+  accountStatus: (id) => call('account:status', id),
+  accountInstall: (id) => call('account:install', id),
+  accountLogin: (id, mode) => call('account:login', id, mode),
+  accountCode: (id, code) => call('account:code', id, code),
+  accountCancel: (id) => call('account:cancel', id),
+  accountLogout: (id) => call('account:logout', id),
+  accountBrowse: (id) => call('account:browse', id),
   saveFile: (o) => call('file:save', o),
   openFile: (o) => call('file:open', o),
   openExternal: (u) => call('shell:openExternal', u),
   openData: () => call('shell:openData'),
   on: (channel, fn) => {
-    const allowed = ['window:state', 'claude:log', 'claude:login', 'scan:request', 'nav'];
+    const allowed = ['window:state', 'account:log', 'account:login', 'scan:request', 'nav'];
     if (!allowed.includes(channel)) return () => {};
     const h = (_e, payload) => fn(payload);
     ipcRenderer.on(channel, h);

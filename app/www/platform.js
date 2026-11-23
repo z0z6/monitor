@@ -19,11 +19,12 @@
     hasSecret: (name) => D.hasSecret(name),
     setSecret: (name, v) => D.setSecret(name, v),
     notify: (t, b) => D.notify(t, b).catch(() => {}),
-    claudeCode: (req) => D.claudeCode(req),
-    claude: {
-      status: () => D.claudeStatus(), install: () => D.claudeInstall(), login: () => D.claudeLogin(),
-      submit: (c) => D.claudeCodeSubmit(c), cancel: () => D.claudeCancel(), logout: () => D.claudeLogout(),
-      path: () => D.claudePath(), browse: () => D.claudeBrowse(),
+    // Konta AI (ChatGPT, Gemini, Claude) przez oficjalne programy na komputerze – tylko w wersji na komputer.
+    aiRun: (req) => D.aiRun(req),
+    accounts: {
+      status: (id) => D.accountStatus(id), install: (id) => D.accountInstall(id), login: (id, mode) => D.accountLogin(id, mode),
+      code: (id, c) => D.accountCode(id, c), cancel: (id) => D.accountCancel(id), logout: (id) => D.accountLogout(id),
+      browse: (id) => D.accountBrowse(id), test: (id) => D.accountTest(id),
     },
     settingsChanged: () => D.settingsChanged(),
     setAutostart: (on) => D.setAutostart(on),
@@ -80,8 +81,8 @@
       } catch (e) { console.error('Powiadomienie nie powiodło się', e); }
     },
     requestNotifications: async () => { try { return (await Cap.LocalNotifications.requestPermissions()).display === 'granted'; } catch (_) { return false; } },
-    claudeCode: null,
-    claude: null,
+    aiRun: null,
+    accounts: null,
     settingsChanged: async () => true,
     setAutostart: async () => false,
     saveFile: async ({ name, text }) => {
@@ -116,8 +117,8 @@
     hasSecret: async (name) => !!localStorage.getItem(`monitor.secret.${name}`),
     setSecret: async (name, v) => { if (v) localStorage.setItem(`monitor.secret.${name}`, v); else localStorage.removeItem(`monitor.secret.${name}`); return !!v; },
     notify: async () => {},
-    claudeCode: null,
-    claude: null,
+    aiRun: null,
+    accounts: null,
     settingsChanged: async () => true,
     setAutostart: async () => false,
     saveFile: async ({ name, text }) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' })); a.download = name; a.click(); return name; },

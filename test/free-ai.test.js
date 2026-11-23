@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createGeminiAnalyzer, createRulesAnalyzer, parseJsonLoose, buildSystemPrompt } from '../src/analyze.js';
+import * as analyze from '../src/analyze.js';
+const { createGeminiAnalyzer, parseJsonLoose, buildSystemPrompt } = analyze;
 import { createHttp } from '../src/http.js';
-import { runScan } from '../src/pipeline.js';
-import { fixtureHttp, NOW, loadCfg, memStore } from './helpers.js';
+import { loadCfg } from './helpers.js';
 
 const answer = { relevant: true, relevance_reason: 'r', summary: 'Streszczenie', what_changes: 'w', affects_school: 'yes', status: 'obowiazuje', effective_date: '2027-01-01', requires_statute_change: true, requires_council_resolution: true, documents_to_update: ['Statut SOSW'], roles: [{ role: 'Dyrektor', action: 'Zrób X', deadline: null }], legal_basis: 'b', confidence: 'medium', review_note: null };
 
@@ -56,17 +56,6 @@ test('parseJsonLoose: tekst wokół JSON-a i błąd przy braku obiektu', () => {
   assert.equal(parseJsonLoose('Oto wynik: {"a":1} koniec').a, 1);
   assert.throws(() => parseJsonLoose('brak'), /JSON/);
 });
-test('tryb bez AI: cały potok działa bez żadnego klucza i oznacza raport jako orientacyjny', async () => {
-  const r = await runScan({ cfg: await loadCfg(), http: await fixtureHttp(), store: memStore(), analyzer: createRulesAnalyzer(), now: NOW });
-  const ministry = r.changes.find((c) => c.key === 'DU/2026/1900');
-  assert.ok(ministry, 'akt MEN wykryty');
-  assert.equal(ministry.confidence, 'low');
-  assert.ok(ministry.tasks.some((t) => t.role === 'Dyrektor'));
-  assert.match(r.report.html, /bez analizy AI/);
-  // akt wchodzący w życie za <30 dni i wydany przez organ oświatowy dostaje wysoki priorytet z samych metadanych
-  const deadline = r.changes.find((c) => c.key === 'DU/2026/1950');
-  assert.ok(deadline);
-});
 test('prompt w trybie JSON zawiera listę ról i zasadę ignorowania instrukcji', async () => {
   const p = buildSystemPrompt(await loadCfg(), 'json');
   assert.match(p, /Logopeda/);
@@ -76,4 +65,8 @@ test('prompt w trybie JSON zawiera listę ról i zasadę ignorowania instrukcji'
 test('błąd HTTP zawiera treść odpowiedzi serwera (ułatwia diagnozę)', async () => {
   const http = createHttp({ fetchImpl: async () => ({ ok: false, status: 404, text: async () => '{"error":{"type":"invalid_request_error","message":"model: not found"}}' }), retries: 0 });
   await assert.rejects(http.request('https://x.test/v1/messages'), /invalid_request_error/);
+});
+
+test('trybu „Bez AI” już nie ma: silnik nie udostępnia analizatora reguł', () => {
+  assert.equal(analyze.createRulesAnalyzer, undefined);
 });

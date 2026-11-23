@@ -13,10 +13,15 @@ Wszystko dzieje się na urządzeniu: bez serwera, bez chmury, dane zostają loka
 
 | Sposób | Gdzie | Koszt |
 |---|---|---|
-| Konto Claude (Claude Code) | komputer | w ramach planu Claude (Pro/Max). Aplikacja instaluje oficjalny program Claude Code i otwiera stronę logowania Claude; nie widzi hasła ani tokenów |
-| Klucz API Claude | komputer i telefon | za zużycie (platform.claude.com) |
-| Klucz API Gemini | komputer i telefon | darmowy poziom Google AI Studio |
-| Bez AI | wszędzie | 0 zł, tylko słowa kluczowe |
+| Konto ChatGPT (Codex CLI) – domyślne | komputer | darmowe konto ChatGPT |
+| Konto Google Gemini (Antigravity CLI `agy`) | komputer | darmowe konto Google |
+| Konto Claude (Claude Code) | komputer | w ramach planu Claude Pro/Max |
+| Klucz API Gemini | komputer (zaawansowane) i telefon | darmowy poziom Google AI Studio |
+| Klucz API Claude | komputer (zaawansowane) i telefon | za zużycie (platform.claude.com) |
+
+Konta łączy się w Ustawieniach → AI przyciskiem „Połącz”: arkusz zgody, instalacja oficjalnego programu (bez administratora), logowanie w przeglądarce
+(ChatGPT: także kodem urządzenia; Gemini: w okienku terminala, bo `agy` nie ma polecenia `login`). Aplikacja nie widzi haseł ani tokenów.
+Przy wyczerpanym limicie skan przechodzi na kolejne połączone konto. Trybu „Bez AI” nie ma od wersji 1.1.
 
 Klucze API na komputerze są szyfrowane systemowo (safeStorage) i nie trafiają do okna aplikacji. Na Linuksie bez magazynu kluczy (keyring) klucz jest tylko zakodowany w pliku dostępnym wyłącznie dla Twojego konta.
 Na Androidzie klucze są w prywatnej pamięci aplikacji, wyłączonej z kopii zapasowych.
@@ -50,8 +55,13 @@ npm run android:prepare && (cd android && ./gradlew assembleDebug)   # APK, wyma
 
 ## Budowa kodu
 - `www/`: wspólny interfejs (styl macOS/iOS, tryb jasny i ciemny, na telefonie pasek kart na dole).
-- `engine/`: łączy silnik z `../src` (w tym magazyn danych i klient HTTP) z aplikacją i dodaje analizator Claude Code. `npm run build:engine` składa go w `www/engine.js`.
-- `electron/`: proces główny na komputer (pobieranie stron bez blokad CORS, zapis plików, klucze, Claude Code, zasobnik, autostart).
+- `engine/`: łączy silnik z `../src` (w tym magazyn danych i klient HTTP) z aplikacją, dodaje analizator kont AI i migrację ustawień AI z wersji 1.0. `npm run build:engine` składa go w `www/engine.js`.
+- `electron/`: proces główny na komputer (pobieranie stron bez blokad CORS, zapis plików, klucze, zasobnik, autostart).
+  - `ai/providers.js`: Codex CLI, Antigravity CLI, Claude Code; `providerChain` i `runWithFallback` (przełączanie przy `AI_LIMIT`), `classify` (limit/logowanie), `parseAgyOutput`.
+  - `ai/cli-tools.js`: wyszukiwanie programów, uruchamianie, instalacja oficjalnym skryptem, okno terminala do logowania, `killAll` przy zamknięciu.
+  - `ai/pdf-text.js`: tekst z PDF-u aktu (pdf.js, poza asar) dla ChatGPT i Gemini.
+  - `accounts.js`: stan kont, instalacja, logowanie (przeglądarka, kod urządzenia, terminal), wylogowanie.
+- Testy `npm test` (`spec/engine.spec.js`): silnik w wersji aplikacji, migracja ustawień, argumenty programów, przełączanie przy limicie i atrapy `codex`/`agy`/`claude` w PATH.
 - Android: Capacitor. Projekt `android/` powstaje w CI ze skryptu `scripts/android-prepare.mjs` (ikony z `android-res/`).
 
 ## Czego aplikacja nie robi
